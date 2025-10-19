@@ -6,7 +6,7 @@ import express from 'express';
 import { PDFDocument } from 'pdf-lib';
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 
 // Authenticate with B2 Native API and get authorization token
