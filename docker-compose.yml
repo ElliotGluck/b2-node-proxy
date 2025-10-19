@@ -8,9 +8,7 @@ services:
     environment:
       - B2_APPLICATION_KEY_ID=${B2_APPLICATION_KEY_ID}
       - B2_APPLICATION_KEY=${B2_APPLICATION_KEY}
-      # Use either B2_BUCKET_ID (single bucket) or B2_BUCKET_MAP (multiple buckets)
-      - B2_BUCKET_ID=${B2_BUCKET_ID:-}
-      - B2_BUCKET_MAP=${B2_BUCKET_MAP:-}
+      - B2_BUCKET_MAP=${B2_BUCKET_MAP}
       - MERGE_PDF_VERSIONS=${MERGE_PDF_VERSIONS:-true}
       - BROWSER_CACHE_TTL=${BROWSER_CACHE_TTL:-14400}
       - CDN_CACHE_TTL=${CDN_CACHE_TTL:-31536000}

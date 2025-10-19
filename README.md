@@ -15,29 +15,12 @@ Node.js proxy server for Backblaze B2 with PDF version merging support.
 
 Create a `.env` file based on `.env.example`:
 
-### Option 1: Single Bucket Mode
-
-```bash
-# Required
-B2_APPLICATION_KEY_ID=your_key_id_here
-B2_APPLICATION_KEY=your_secret_key_here
-B2_BUCKET_ID=your_bucket_id_here
-
-# Optional
-MERGE_PDF_VERSIONS=true                # Enable PDF merging (default: false)
-BROWSER_CACHE_TTL=14400               # Browser cache: 4 hours (default)
-CDN_CACHE_TTL=31536000                # CDN cache: 1 year (default)
-PORT=3001                              # Server port (default: 3001)
-```
-
-### Option 2: Multiple Bucket Mode (Recommended)
-
 ```bash
 # Required
 B2_APPLICATION_KEY_ID=your_key_id_here
 B2_APPLICATION_KEY=your_secret_key_here
 
-# Map custom paths to bucket IDs (JSON format)
+# Bucket mapping - Map custom paths to bucket IDs (JSON format)
 B2_BUCKET_MAP={"invoices":"bucket_id_1","reports":"bucket_id_2","documents":"bucket_id_3"}
 
 # Optional
@@ -113,23 +96,13 @@ npm run dev
 
 ## Usage
 
-### Single Bucket Mode
-
-Access files directly:
-
-```
-http://localhost:3000/path/to/file.pdf
-```
-
-### Multiple Bucket Mode
-
 Access files using the bucket prefix path:
 
 ```
 # Example with B2_BUCKET_MAP={"invoices":"bucket1","reports":"bucket2"}
 
-http://localhost:3000/invoices/2024/january.pdf    # Accesses bucket1
-http://localhost:3000/reports/annual-report.pdf    # Accesses bucket2
+http://localhost:3001/invoices/2024/january.pdf    # Accesses bucket1
+http://localhost:3001/reports/annual-report.pdf    # Accesses bucket2
 ```
 
 The first path segment (`invoices`, `reports`) is mapped to the corresponding bucket ID, and the remaining path is used as the file path within that bucket.

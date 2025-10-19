@@ -247,41 +247,35 @@ app.get('/*', async (req, res) => {
         const authData = await b2Authorize();
 
         // Parse bucket mapping from environment (JSON format)
+        if (!process.env.B2_BUCKET_MAP) {
+            throw new Error('B2_BUCKET_MAP environment variable is required');
+        }
+
         let bucketId;
         let filePath;
 
-        // Check if using bucket mapping (multiple buckets)
-        if (process.env.B2_BUCKET_MAP) {
-            try {
-                const bucketMap = JSON.parse(process.env.B2_BUCKET_MAP);
+        try {
+            const bucketMap = JSON.parse(process.env.B2_BUCKET_MAP);
 
-                // Extract the first path segment as the bucket prefix
-                const pathSegments = fullPath.split('/');
-                const bucketPrefix = pathSegments[0];
+            // Extract the first path segment as the bucket prefix
+            const pathSegments = fullPath.split('/');
+            const bucketPrefix = pathSegments[0];
 
-                // Look up the bucket ID for this prefix
-                bucketId = bucketMap[bucketPrefix];
+            // Look up the bucket ID for this prefix
+            bucketId = bucketMap[bucketPrefix];
 
-                if (!bucketId) {
-                    return res.status(404).send(`Bucket prefix '${bucketPrefix}' not found. Available prefixes: ${Object.keys(bucketMap).join(', ')}`);
-                }
-
-                // The file path is everything after the bucket prefix
-                filePath = pathSegments.slice(1).join('/');
-
-                if (!filePath) {
-                    return res.status(404).send('File path required after bucket prefix');
-                }
-            } catch (error) {
-                throw new Error(`Invalid B2_BUCKET_MAP JSON: ${error.message}`);
-            }
-        } else {
-            // Single bucket mode - use B2_BUCKET_ID
-            bucketId = process.env.B2_BUCKET_ID;
             if (!bucketId) {
-                throw new Error('Either B2_BUCKET_ID or B2_BUCKET_MAP environment variable is required');
+                return res.status(404).send(`Bucket prefix '${bucketPrefix}' not found. Available prefixes: ${Object.keys(bucketMap).join(', ')}`);
             }
-            filePath = fullPath;
+
+            // The file path is everything after the bucket prefix
+            filePath = pathSegments.slice(1).join('/');
+
+            if (!filePath) {
+                return res.status(404).send('File path required after bucket prefix');
+            }
+        } catch (error) {
+            throw new Error(`Invalid B2_BUCKET_MAP JSON: ${error.message}`);
         }
 
         // Check if this is a PDF and if merging is enabled
