@@ -14,7 +14,7 @@
     "prettier": "^3.3.3"
   },
   "dependencies": {
-    "aws4fetch": "^1.0.20",
+    "pdf-lib": "^1.17.1",
     "wrangler": "^3.80.1"
   }
 }

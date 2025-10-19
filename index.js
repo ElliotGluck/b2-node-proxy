@@ -1,60 +1,219 @@
 //
-// Proxy Backblaze S3 compatible API requests, sending notifications to a webhook
+// Cloudflare Worker to serve files from Backblaze B2
+// With support for merging multiple PDF versions
 //
-// Adapted from https://github.com/obezuk/worker-signed-s3-template
-//
-import { AwsClient } from 'aws4fetch'
+import { PDFDocument } from 'pdf-lib'
 
-const UNSIGNABLE_HEADERS = [
-    // These headers appear in the request, but are never passed upstream
-    'x-forwarded-proto',
-    'x-real-ip',
-    // We can't include accept-encoding in the signature because Cloudflare
-    // sets the incoming accept-encoding header to "gzip, br", then modifies
-    // the outgoing request to set accept-encoding to "gzip".
-    // Not cool, Cloudflare!
-    'accept-encoding',
-    // Conditional headers are not consistently passed upstream
-    'if-match',
-    'if-modified-since',
-    'if-none-match',
-    'if-range',
-    'if-unmodified-since',
-];
-
-// URL needs colon suffix on protocol, and port as a string
-const HTTPS_PROTOCOL = "https:";
-const HTTPS_PORT = "443";
-
-// How many times to retry a range request where the response is missing content-range
-const RANGE_RETRY_ATTEMPTS = 3;
-
-// Filter out cf-* and any other headers we don't want to include in the signature
-function filterHeaders(headers, env) {
-    // Suppress irrelevant IntelliJ warning
-    // noinspection JSCheckFunctionSignatures
-    return new Headers(Array.from(headers.entries())
-        .filter(pair => !(
-            UNSIGNABLE_HEADERS.includes(pair[0])
-            || pair[0].startsWith('cf-')
-            || ('ALLOWED_HEADERS' in env && !env['ALLOWED_HEADERS'].includes(pair[0]))
-        ))
-    );
-}
-
-function createHeadResponse(response) {
-    return new Response(null, {
-        headers: response.headers,
-        status: response.status,
-        statusText: response.statusText
+// Authenticate with B2 Native API and get authorization token
+async function b2Authorize(env) {
+    const authString = btoa(`${env['B2_APPLICATION_KEY_ID']}:${env['B2_APPLICATION_KEY']}`);
+    const response = await fetch('https://api.backblazeb2.com/b2api/v4/b2_authorize_account', {
+        method: 'GET',
+        headers: {
+            'Authorization': `Basic ${authString}`
+        }
     });
+
+    if (!response.ok) {
+        throw new Error(`B2 authorization failed: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+
+    // Extract the URLs from the nested structure
+    return {
+        authorizationToken: data.authorizationToken,
+        apiUrl: data.apiInfo.storageApi.apiUrl,
+        downloadUrl: data.apiInfo.storageApi.downloadUrl,
+        accountId: data.accountId
+    };
 }
 
-function isListBucketRequest(env, path) {
-    const pathSegments = path.split('/');
+// List all versions of a specific file using B2 Native API
+async function listFileVersions(authData, bucketId, fileName) {
+    const versions = [];
+    let startFileName = fileName;
+    let startFileId = null;
 
-    return (env['BUCKET_NAME'] === "$path" && pathSegments.length < 2) // https://endpoint/bucket-name/
-        || (env['BUCKET_NAME'] !== "$path" && path.length === 0); // https://bucket-name.endpoint/ or https://endpoint/
+    while (true) {
+        const params = new URLSearchParams({
+            bucketId: bucketId,
+            startFileName: startFileName,
+            maxFileCount: '10000',
+            prefix: fileName
+        });
+
+        if (startFileId) {
+            params.append('startFileId', startFileId);
+        }
+
+        const response = await fetch(`${authData.apiUrl}/b2api/v4/b2_list_file_versions?${params}`, {
+            method: 'GET',
+            headers: {
+                'Authorization': authData.authorizationToken
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error(`Failed to list file versions: ${response.status} ${response.statusText}`);
+        }
+
+        const data = await response.json();
+
+        // Filter to only include versions that match the exact fileName and are uploads
+        const matchingFiles = data.files.filter(f => f.fileName === fileName && f.action === 'upload');
+        versions.push(...matchingFiles);
+
+        // Check if there are more results
+        if (data.nextFileName && data.nextFileName === fileName) {
+            startFileName = data.nextFileName;
+            startFileId = data.nextFileId;
+        } else {
+            break;
+        }
+    }
+
+    return versions;
+}
+
+// Delete a file version using B2 Native API
+async function deleteFileVersion(authData, fileId, fileName) {
+    const response = await fetch(`${authData.apiUrl}/b2api/v4/b2_delete_file_version`, {
+        method: 'POST',
+        headers: {
+            'Authorization': authData.authorizationToken,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            fileId: fileId,
+            fileName: fileName
+        })
+    });
+
+    if (!response.ok) {
+        throw new Error(`Failed to delete file version ${fileId}: ${response.status} ${response.statusText}`);
+    }
+
+    return await response.json();
+}
+
+// Download a file using the download URL
+async function downloadFile(authData, fileId) {
+    const response = await fetch(`${authData.downloadUrl}/b2api/v4/b2_download_file_by_id?fileId=${fileId}`, {
+        method: 'GET',
+        headers: {
+            'Authorization': authData.authorizationToken
+        }
+    });
+
+    if (!response.ok) {
+        throw new Error(`Failed to download file ${fileId}: ${response.status} ${response.statusText}`);
+    }
+
+    return await response.arrayBuffer();
+}
+
+// Combine multiple PDFs into one
+async function combinePDFs(pdfBuffers) {
+    const mergedPdf = await PDFDocument.create();
+
+    for (const buffer of pdfBuffers) {
+        try {
+            const pdf = await PDFDocument.load(buffer);
+            const copiedPages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
+            copiedPages.forEach((page) => {
+                mergedPdf.addPage(page);
+            });
+        } catch (error) {
+            console.error('Error loading PDF:', error);
+            throw error;
+        }
+    }
+
+    return await mergedPdf.save();
+}
+
+// Get unique file versions by SHA1 hash and delete duplicates
+async function deduplicateAndCombineVersions(authData, bucketId, fileName, mergeEnabled) {
+    // Get all versions of the file
+    const versions = await listFileVersions(authData, bucketId, fileName);
+
+    console.log(`Found ${versions.length} version(s) of ${fileName}`);
+
+    if (versions.length === 0) {
+        return null;
+    }
+
+    // If only one version, just download and return it
+    if (versions.length === 1) {
+        console.log(`Only one version found, downloading: ${versions[0].fileId}`);
+        const fileData = await downloadFile(authData, versions[0].fileId);
+        return fileData;
+    }
+
+    // Group versions by SHA1 hash to identify duplicates
+    const versionsByHash = new Map();
+
+    for (const version of versions) {
+        const hash = version.contentSha1;
+        if (!versionsByHash.has(hash)) {
+            versionsByHash.set(hash, []);
+        }
+        versionsByHash.get(hash).push(version);
+    }
+
+    console.log(`Found ${versionsByHash.size} unique version(s) by hash`);
+
+    // Collect unique versions (keep the first of each hash group) and identify duplicates to delete
+    const uniqueVersions = [];
+    const versionsToDelete = [];
+
+    for (const [hash, versionGroup] of versionsByHash.entries()) {
+        // Keep the first version (usually the oldest)
+        uniqueVersions.push(versionGroup[0]);
+
+        // Mark the rest as duplicates to delete
+        for (let i = 1; i < versionGroup.length; i++) {
+            versionsToDelete.push(versionGroup[i]);
+        }
+    }
+
+    // Delete duplicate versions
+    for (const version of versionsToDelete) {
+        try {
+            await deleteFileVersion(authData, version.fileId, version.fileName);
+            console.log(`Deleted duplicate version: ${version.fileId}`);
+        } catch (error) {
+            console.error(`Failed to delete version ${version.fileId}:`, error);
+        }
+    }
+
+    // If only one unique version after deduplication, return it
+    if (uniqueVersions.length === 1) {
+        console.log(`One unique version after deduplication, downloading: ${uniqueVersions[0].fileId}`);
+        const fileData = await downloadFile(authData, uniqueVersions[0].fileId);
+        return fileData;
+    }
+
+    // If merge is not enabled, just return the latest version
+    if (!mergeEnabled) {
+        console.log(`Multiple versions but merge disabled, returning latest: ${uniqueVersions[0].fileId}`);
+        const fileData = await downloadFile(authData, uniqueVersions[0].fileId);
+        return fileData;
+    }
+
+    // Download all unique versions
+    console.log(`Downloading ${uniqueVersions.length} unique versions for merging`);
+    const pdfBuffers = [];
+    for (const version of uniqueVersions) {
+        const fileData = await downloadFile(authData, version.fileId);
+        pdfBuffers.push(fileData);
+    }
+
+    // Combine all unique PDFs
+    console.log(`Combining ${pdfBuffers.length} PDFs`);
+    const combinedPdf = await combinePDFs(pdfBuffers);
+    return combinedPdf;
 }
 
 // Supress IntelliJ's "unused default export" warning
@@ -71,138 +230,88 @@ export default {
 
         const url = new URL(request.url);
 
-        // Incoming protocol and port is taken from the worker's environment.
-        // Local dev mode uses plain http on 8787, and it's possible to deploy
-        // a worker on plain http. B2 only supports https on 443
-        url.protocol = HTTPS_PROTOCOL;
-        url.port = HTTPS_PORT;
+        // Remove leading and trailing slashes from path
+        let path = url.pathname.replace(/^\//, '').replace(/\/$/, '');
 
-        // Remove leading slashes from path
-        let path = url.pathname.replace(/^\//, '');
-        // Remove trailing slashes
-        path = path.replace(/\/$/, '');
-
-        // Reject list bucket requests unless configuration allows it
-        if (isListBucketRequest(env, path) && String(env['ALLOW_LIST_BUCKET']) !== "true") {
-            return new Response(null, {
-                status: 404,
-                statusText: "Not Found"
+        if (!path) {
+            return new Response('Backblaze B2 Proxy', {
+                status: 200,
+                headers: { 'Content-Type': 'text/plain' }
             });
         }
 
-        // Set RCLONE_DOWNLOAD to "true" to use rclone with --b2-download-url
-        // See https://rclone.org/b2/#b2-download-url
-        const rcloneDownload = String(env["RCLONE_DOWNLOAD"]) === 'true';
+        try {
+            // Authorize with B2 Native API
+            const authData = await b2Authorize(env);
 
-        // Set upstream target hostname.
-        switch (env['BUCKET_NAME']) {
-            case "$path":
-                // Bucket name is initial segment of URL path
-                url.hostname = env['B2_ENDPOINT'];
-                break;
-            case "$host":
-                // Bucket name is initial subdomain of the incoming hostname
-                url.hostname = url.hostname.split('.')[0] + '.' + env['B2_ENDPOINT'];
-                break;
-            default:
-                // Bucket name is specified in the BUCKET_NAME variable
-                url.hostname = env['BUCKET_NAME'] + "." + env['B2_ENDPOINT'];
-                break;
-        }
+            // Get bucket ID from environment variable
+            const bucketId = env['B2_BUCKET_ID'];
+            if (!bucketId) {
+                throw new Error('B2_BUCKET_ID environment variable is required');
+            }
 
-        // Certain headers, such as x-real-ip, appear in the incoming request but
-        // are removed from the outgoing request. If they are in the outgoing
-        // signed headers, B2 can't validate the signature.
-        const headers = filterHeaders(request.headers, env);
+            // Check if this is a PDF and if merging is enabled
+            const isPdf = path.toLowerCase().endsWith('.pdf');
+            const mergeVersions = String(env['MERGE_PDF_VERSIONS']) === 'true';
 
-        // Create an S3 API client that can sign the outgoing request
-        const client = new AwsClient({
-            "accessKeyId": env['B2_APPLICATION_KEY_ID'],
-            "secretAccessKey": env['B2_APPLICATION_KEY'],
-            "service": "s3",
-        });
+            if (request.method === 'HEAD') {
+                // For HEAD requests, just check if file exists
+                const versions = await listFileVersions(authData, bucketId, path);
 
-        // Save the request method, so we can process responses for HEAD requests appropriately
-        const requestMethod = request.method;
-
-        if (rcloneDownload) {
-            if (env['BUCKET_NAME'] === "$path") {
-                // Remove leading file/ prefix from the path
-                url.pathname = path.replace(/^file\//, "");
-            } else {
-                // Remove leading file/{bucket_name}/ prefix from the path 
-                url.pathname = path.replace(/^file\/[^/]+\//, "");
-            }            
-        }
-
-        // Sign the outgoing request
-        //
-        // For HEAD requests Cloudflare appears to change the method on the outgoing request to GET (#18), which
-        // breaks the signature, resulting in a 403. So, change all HEADs to GETs. This is not too inefficient,
-        // since we won't read the body of the response if the original request was a HEAD.
-        const signedRequest = await client.sign(url.toString(), {
-            method: 'GET',
-            headers: headers
-        });
-
-        // For large files, Cloudflare will return the entire file, rather than the requested range
-        // So, if there is a range header in the request, check that the response contains the
-        // content-range header. If not, abort the request and try again.
-        // See https://community.cloudflare.com/t/cloudflare-worker-fetch-ignores-byte-request-range-on-initial-request/395047/4
-        if (signedRequest.headers.has("range")) {
-            let attempts = RANGE_RETRY_ATTEMPTS;
-            let response;
-            do {
-                let controller = new AbortController();
-                response = await fetch(signedRequest.url, {
-                    method: signedRequest.method,
-                    headers: signedRequest.headers,
-                    signal: controller.signal,
-                });
-                if (response.headers.has("content-range")) {
-                    // Only log if it didn't work first time
-                    if (attempts < RANGE_RETRY_ATTEMPTS) {
-                        console.log(`Retry for ${signedRequest.url} succeeded - response has content-range header`);
-                    }
-                    // Break out of loop and return the response
-                    break;
-                } else if (response.ok) {
-                    attempts -= 1;
-                    console.error(`Range header in request for ${signedRequest.url} but no content-range header in response. Will retry ${attempts} more times`);
-                    // Do not abort on the last attempt, as we want to return the response
-                    if (attempts > 0) {
-                        controller.abort();
-                    }
-                } else {
-                    // Response is not ok, so don't retry
-                    break;
+                if (versions.length === 0) {
+                    return new Response(null, {
+                        status: 404,
+                        statusText: "Not Found"
+                    });
                 }
-            } while (attempts > 0);
 
-            if (attempts <= 0) {
-                console.error(`Tried range request for ${signedRequest.url} ${RANGE_RETRY_ATTEMPTS} times, but no content-range in response.`);
+                // Return basic info from the latest version
+                const latestVersion = versions[0];
+                return new Response(null, {
+                    status: 200,
+                    headers: {
+                        'Content-Type': latestVersion.contentType || 'application/octet-stream',
+                        'Content-Length': latestVersion.contentLength.toString(),
+                    }
+                });
             }
 
-            if (requestMethod === 'HEAD') {
-                // Original request was HEAD, so return a new Response without a body
-                return createHeadResponse(response);
+            // GET request - download and possibly merge
+            const fileData = await deduplicateAndCombineVersions(authData, bucketId, path, isPdf && mergeVersions);
+
+            if (fileData === null) {
+                return new Response(null, {
+                    status: 404,
+                    statusText: "Not Found"
+                });
             }
 
-            // Return whatever response we have rather than an error response
-            // This response cannot be aborted, otherwise it will raise an exception
-            return response;
+            // Determine content type
+            let contentType = 'application/octet-stream';
+            if (isPdf) {
+                contentType = 'application/pdf';
+            } else if (path.toLowerCase().endsWith('.jpg') || path.toLowerCase().endsWith('.jpeg')) {
+                contentType = 'image/jpeg';
+            } else if (path.toLowerCase().endsWith('.png')) {
+                contentType = 'image/png';
+            } else if (path.toLowerCase().endsWith('.txt')) {
+                contentType = 'text/plain';
+            }
+
+            // Return the file
+            return new Response(fileData, {
+                headers: {
+                    'Content-Type': contentType,
+                    'Content-Disposition': `inline; filename="${path.split('/').pop()}"`,
+                }
+            });
+
+        } catch (error) {
+            console.error('Error processing request:', error);
+            return new Response(`Error: ${error.message}`, {
+                status: 500,
+                statusText: "Internal Server Error"
+            });
         }
-
-        // Send the signed request to B2
-        const fetchPromise = fetch(signedRequest);
-
-        if (requestMethod === 'HEAD') {
-            const response = await fetchPromise;
-            // Original request was HEAD, so return a new Response without a body
-            return createHeadResponse(response);
-        }
-
-        // Return the upstream response unchanged
-        return fetchPromise;
     },
 };
