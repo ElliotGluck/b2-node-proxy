@@ -6,7 +6,8 @@ import express from 'express';
 import { PDFDocument } from 'pdf-lib';
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
+const HOST = process.env.HOST || '0.0.0.0';
 
 // Authenticate with B2 Native API and get authorization token
 async function b2Authorize() {
@@ -236,28 +237,60 @@ app.get('/health', (req, res) => {
 app.get('/*', async (req, res) => {
     try {
         // Get the file path from URL
-        let path = req.path.replace(/^\//, '').replace(/\/$/, '');
+        let fullPath = req.path.replace(/^\//, '').replace(/\/$/, '');
 
-        if (!path) {
+        if (!fullPath) {
             return res.status(200).send('Backblaze B2 Proxy');
         }
 
         // Authorize with B2 Native API
         const authData = await b2Authorize();
 
-        // Get bucket ID from environment variable
-        const bucketId = process.env.B2_BUCKET_ID;
-        if (!bucketId) {
-            throw new Error('B2_BUCKET_ID environment variable is required');
+        // Parse bucket mapping from environment (JSON format)
+        let bucketId;
+        let filePath;
+
+        // Check if using bucket mapping (multiple buckets)
+        if (process.env.B2_BUCKET_MAP) {
+            try {
+                const bucketMap = JSON.parse(process.env.B2_BUCKET_MAP);
+
+                // Extract the first path segment as the bucket prefix
+                const pathSegments = fullPath.split('/');
+                const bucketPrefix = pathSegments[0];
+
+                // Look up the bucket ID for this prefix
+                bucketId = bucketMap[bucketPrefix];
+
+                if (!bucketId) {
+                    return res.status(404).send(`Bucket prefix '${bucketPrefix}' not found. Available prefixes: ${Object.keys(bucketMap).join(', ')}`);
+                }
+
+                // The file path is everything after the bucket prefix
+                filePath = pathSegments.slice(1).join('/');
+
+                if (!filePath) {
+                    return res.status(404).send('File path required after bucket prefix');
+                }
+            } catch (error) {
+                throw new Error(`Invalid B2_BUCKET_MAP JSON: ${error.message}`);
+            }
+        } else {
+            // Single bucket mode - use B2_BUCKET_ID
+            bucketId = process.env.B2_BUCKET_ID;
+            if (!bucketId) {
+                throw new Error('Either B2_BUCKET_ID or B2_BUCKET_MAP environment variable is required');
+            }
+            filePath = fullPath;
         }
 
         // Check if this is a PDF and if merging is enabled
-        const isPdf = path.toLowerCase().endsWith('.pdf');
+        const isPdf = filePath.toLowerCase().endsWith('.pdf');
         const mergeVersions = String(process.env.MERGE_PDF_VERSIONS) === 'true';
 
         // Handle HEAD requests
         if (req.method === 'HEAD') {
-            const versions = await listFileVersions(authData, bucketId, path);
+            const versions = await listFileVersions(authData, bucketId, filePath);
 
             if (versions.length === 0) {
                 return res.status(404).send('Not Found');
@@ -271,7 +304,7 @@ app.get('/*', async (req, res) => {
         }
 
         // GET request - download and possibly merge
-        const fileData = await deduplicateAndCombineVersions(authData, bucketId, path, isPdf && mergeVersions);
+        const fileData = await deduplicateAndCombineVersions(authData, bucketId, filePath, isPdf && mergeVersions);
 
         if (fileData === null) {
             return res.status(404).send('Not Found');
@@ -281,11 +314,11 @@ app.get('/*', async (req, res) => {
         let contentType = 'application/octet-stream';
         if (isPdf) {
             contentType = 'application/pdf';
-        } else if (path.toLowerCase().endsWith('.jpg') || path.toLowerCase().endsWith('.jpeg')) {
+        } else if (filePath.toLowerCase().endsWith('.jpg') || filePath.toLowerCase().endsWith('.jpeg')) {
             contentType = 'image/jpeg';
-        } else if (path.toLowerCase().endsWith('.png')) {
+        } else if (filePath.toLowerCase().endsWith('.png')) {
             contentType = 'image/png';
-        } else if (path.toLowerCase().endsWith('.txt')) {
+        } else if (filePath.toLowerCase().endsWith('.txt')) {
             contentType = 'text/plain';
         }
 
@@ -296,7 +329,7 @@ app.get('/*', async (req, res) => {
         // Send response with caching headers
         res.status(200)
             .set('Content-Type', contentType)
-            .set('Content-Disposition', `inline; filename="${path.split('/').pop()}"`)
+            .set('Content-Disposition', `inline; filename="${filePath.split('/').pop()}"`)
             .set('Cache-Control', `public, max-age=${browserCacheTtl}`)
             .set('CDN-Cache-Control', `public, max-age=${cdnCacheTtl}`)
             .send(Buffer.from(fileData));
@@ -308,6 +341,7 @@ app.get('/*', async (req, res) => {
 });
 
 // Start server
-app.listen(PORT, () => {
-    console.log(`B2 Proxy server listening on port ${PORT}`);
+app.listen(PORT, HOST, () => {
+    console.log(`B2 Proxy server listening on ${HOST}:${PORT}`);
+    console.log(`Health check available at http://${HOST}:${PORT}/health`);
 });

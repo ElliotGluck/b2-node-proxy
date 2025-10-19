@@ -13,8 +13,8 @@ RUN npm ci --only=production
 # Copy application code
 COPY index.js ./
 
-# Expose port
-EXPOSE 3000
+# Expose port (configurable via PORT env var, defaults to 3001)
+EXPOSE 3001
 
 # Set non-root user for security
 USER node
