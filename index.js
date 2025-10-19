@@ -1,12 +1,23 @@
 //
-// Cloudflare Worker to serve files from Backblaze B2
+// Node.js server to serve files from Backblaze B2
 // With support for merging multiple PDF versions
 //
-import { PDFDocument } from 'pdf-lib'
+import express from 'express';
+import { PDFDocument } from 'pdf-lib';
+
+const app = express();
+const PORT = process.env.PORT || 3000;
 
 // Authenticate with B2 Native API and get authorization token
-async function b2Authorize(env) {
-    const authString = btoa(`${env['B2_APPLICATION_KEY_ID']}:${env['B2_APPLICATION_KEY']}`);
+async function b2Authorize() {
+    const keyId = process.env.B2_APPLICATION_KEY_ID;
+    const key = process.env.B2_APPLICATION_KEY;
+
+    if (!keyId || !key) {
+        throw new Error('B2_APPLICATION_KEY_ID and B2_APPLICATION_KEY environment variables are required');
+    }
+
+    const authString = Buffer.from(`${keyId}:${key}`).toString('base64');
     const response = await fetch('https://api.backblazeb2.com/b2api/v4/b2_authorize_account', {
         method: 'GET',
         headers: {
@@ -216,102 +227,87 @@ async function deduplicateAndCombineVersions(authData, bucketId, fileName, merge
     return combinedPdf;
 }
 
-// Supress IntelliJ's "unused default export" warning
-// noinspection JSUnusedGlobalSymbols
-export default {
-    async fetch(request, env) {
-        // Only allow GET and HEAD methods
-        if (!['GET', 'HEAD'].includes(request.method)){
-            return new Response(null, {
-                status: 405,
-                statusText: "Method Not Allowed"
-            });
-        }
+// Health check endpoint
+app.get('/health', (req, res) => {
+    res.status(200).send('OK');
+});
 
-        const url = new URL(request.url);
-
-        // Remove leading and trailing slashes from path
-        let path = url.pathname.replace(/^\//, '').replace(/\/$/, '');
+// Main file serving endpoint
+app.get('/*', async (req, res) => {
+    try {
+        // Get the file path from URL
+        let path = req.path.replace(/^\//, '').replace(/\/$/, '');
 
         if (!path) {
-            return new Response('Backblaze B2 Proxy', {
-                status: 200,
-                headers: { 'Content-Type': 'text/plain' }
-            });
+            return res.status(200).send('Backblaze B2 Proxy');
         }
 
-        try {
-            // Authorize with B2 Native API
-            const authData = await b2Authorize(env);
+        // Authorize with B2 Native API
+        const authData = await b2Authorize();
 
-            // Get bucket ID from environment variable
-            const bucketId = env['B2_BUCKET_ID'];
-            if (!bucketId) {
-                throw new Error('B2_BUCKET_ID environment variable is required');
-            }
-
-            // Check if this is a PDF and if merging is enabled
-            const isPdf = path.toLowerCase().endsWith('.pdf');
-            const mergeVersions = String(env['MERGE_PDF_VERSIONS']) === 'true';
-
-            if (request.method === 'HEAD') {
-                // For HEAD requests, just check if file exists
-                const versions = await listFileVersions(authData, bucketId, path);
-
-                if (versions.length === 0) {
-                    return new Response(null, {
-                        status: 404,
-                        statusText: "Not Found"
-                    });
-                }
-
-                // Return basic info from the latest version
-                const latestVersion = versions[0];
-                return new Response(null, {
-                    status: 200,
-                    headers: {
-                        'Content-Type': latestVersion.contentType || 'application/octet-stream',
-                        'Content-Length': latestVersion.contentLength.toString(),
-                    }
-                });
-            }
-
-            // GET request - download and possibly merge
-            const fileData = await deduplicateAndCombineVersions(authData, bucketId, path, isPdf && mergeVersions);
-
-            if (fileData === null) {
-                return new Response(null, {
-                    status: 404,
-                    statusText: "Not Found"
-                });
-            }
-
-            // Determine content type
-            let contentType = 'application/octet-stream';
-            if (isPdf) {
-                contentType = 'application/pdf';
-            } else if (path.toLowerCase().endsWith('.jpg') || path.toLowerCase().endsWith('.jpeg')) {
-                contentType = 'image/jpeg';
-            } else if (path.toLowerCase().endsWith('.png')) {
-                contentType = 'image/png';
-            } else if (path.toLowerCase().endsWith('.txt')) {
-                contentType = 'text/plain';
-            }
-
-            // Return the file
-            return new Response(fileData, {
-                headers: {
-                    'Content-Type': contentType,
-                    'Content-Disposition': `inline; filename="${path.split('/').pop()}"`,
-                }
-            });
-
-        } catch (error) {
-            console.error('Error processing request:', error);
-            return new Response(`Error: ${error.message}`, {
-                status: 500,
-                statusText: "Internal Server Error"
-            });
+        // Get bucket ID from environment variable
+        const bucketId = process.env.B2_BUCKET_ID;
+        if (!bucketId) {
+            throw new Error('B2_BUCKET_ID environment variable is required');
         }
-    },
-};
+
+        // Check if this is a PDF and if merging is enabled
+        const isPdf = path.toLowerCase().endsWith('.pdf');
+        const mergeVersions = String(process.env.MERGE_PDF_VERSIONS) === 'true';
+
+        // Handle HEAD requests
+        if (req.method === 'HEAD') {
+            const versions = await listFileVersions(authData, bucketId, path);
+
+            if (versions.length === 0) {
+                return res.status(404).send('Not Found');
+            }
+
+            const latestVersion = versions[0];
+            return res.status(200)
+                .set('Content-Type', latestVersion.contentType || 'application/octet-stream')
+                .set('Content-Length', latestVersion.contentLength.toString())
+                .send();
+        }
+
+        // GET request - download and possibly merge
+        const fileData = await deduplicateAndCombineVersions(authData, bucketId, path, isPdf && mergeVersions);
+
+        if (fileData === null) {
+            return res.status(404).send('Not Found');
+        }
+
+        // Determine content type
+        let contentType = 'application/octet-stream';
+        if (isPdf) {
+            contentType = 'application/pdf';
+        } else if (path.toLowerCase().endsWith('.jpg') || path.toLowerCase().endsWith('.jpeg')) {
+            contentType = 'image/jpeg';
+        } else if (path.toLowerCase().endsWith('.png')) {
+            contentType = 'image/png';
+        } else if (path.toLowerCase().endsWith('.txt')) {
+            contentType = 'text/plain';
+        }
+
+        // Cache durations (in seconds)
+        const browserCacheTtl = parseInt(process.env.BROWSER_CACHE_TTL || '14400', 10); // 4 hours default
+        const cdnCacheTtl = parseInt(process.env.CDN_CACHE_TTL || '31536000', 10); // 1 year default
+
+        // Send response with caching headers
+        res.status(200)
+            .set('Content-Type', contentType)
+            .set('Content-Disposition', `inline; filename="${path.split('/').pop()}"`)
+            .set('Cache-Control', `public, max-age=${browserCacheTtl}`)
+            .set('CDN-Cache-Control', `public, max-age=${cdnCacheTtl}`)
+            .send(Buffer.from(fileData));
+
+    } catch (error) {
+        console.error('Error processing request:', error);
+        res.status(500).send(`Error: ${error.message}`);
+    }
+});
+
+// Start server
+app.listen(PORT, () => {
+    console.log(`B2 Proxy server listening on port ${PORT}`);
+});

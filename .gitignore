@@ -1,15 +1,18 @@
-/target
-/dist
-**/*.rs.bk
-Cargo.lock
-bin/
-pkg/
-wasm-pack.log
-worker/
+# Dependencies
 node_modules/
-.cargo-ok
+
+# Environment variables
 .env
+
+# IDE
 .idea/
-.dev.vars
-.wrangler/
-wrangler.toml
+.vscode/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db

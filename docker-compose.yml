@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  b2-proxy:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - B2_APPLICATION_KEY_ID=${B2_APPLICATION_KEY_ID}
+      - B2_APPLICATION_KEY=${B2_APPLICATION_KEY}
+      - B2_BUCKET_ID=${B2_BUCKET_ID}
+      - MERGE_PDF_VERSIONS=${MERGE_PDF_VERSIONS:-true}
+      - BROWSER_CACHE_TTL=${BROWSER_CACHE_TTL:-14400}
+      - CDN_CACHE_TTL=${CDN_CACHE_TTL:-31536000}
+      - PORT=3000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
