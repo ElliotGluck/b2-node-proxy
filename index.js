@@ -125,6 +125,13 @@ async function downloadFile(authData, fileId) {
     return await response.arrayBuffer();
 }
 
+// Remove null bytes from PDF buffer
+function cleanPdfBuffer(buffer) {
+    const uint8Array = new Uint8Array(buffer);
+    const cleaned = uint8Array.filter(byte => byte !== 0);
+    return cleaned.buffer;
+}
+
 // Combine multiple PDFs into one
 async function combinePDFs(pdfBuffers) {
     const mergedPdf = await PDFDocument.create();
@@ -298,10 +305,16 @@ app.get('/*', async (req, res) => {
         }
 
         // GET request - download and possibly merge
-        const fileData = await deduplicateAndCombineVersions(authData, bucketId, filePath, isPdf && mergeVersions);
+        let fileData = await deduplicateAndCombineVersions(authData, bucketId, filePath, isPdf && mergeVersions);
 
         if (fileData === null) {
             return res.status(404).send('Not Found');
+        }
+
+        // Clean null bytes from PDF files
+        if (isPdf) {
+            console.log('Cleaning null bytes from PDF');
+            fileData = cleanPdfBuffer(fileData);
         }
 
         // Determine content type
