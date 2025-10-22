@@ -314,11 +314,11 @@ app.get('/*', async (req, res) => {
             return res.status(404).send('Not Found');
         }
 
-        // Clean null bytes from PDF files
-        if (isPdf) {
-            console.log('Cleaning null bytes from PDF');
-            fileData = cleanPdfBuffer(fileData);
-        }
+        // Note: PDF cleaning disabled - null bytes are part of valid PDF structure
+        // if (isPdf) {
+        //     console.log('Cleaning null bytes from PDF');
+        //     fileData = cleanPdfBuffer(fileData);
+        // }
 
         // Determine content type
         let contentType = 'application/octet-stream';
