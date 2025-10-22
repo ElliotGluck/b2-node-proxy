@@ -125,17 +125,17 @@ async function downloadFile(authData, fileId) {
     return await response.arrayBuffer();
 }
 
-// Normalize PDF by loading and re-saving it
-// This removes problematic null bytes and other issues from the PDF structure
-async function normalizePdf(buffer) {
-    try {
-        const pdf = await PDFDocument.load(buffer, { ignoreEncryption: true });
-        return await pdf.save();
-    } catch (error) {
-        console.error('Error normalizing PDF, returning original:', error);
-        // If normalization fails, return original buffer
-        return buffer;
+// Clean null bytes from PDF by replacing with spaces
+// This prevents "unsupported Unicode escape sequence" errors in PostgreSQL
+function cleanPdfNullBytes(buffer) {
+    const uint8Array = new Uint8Array(buffer);
+    // Replace null bytes with spaces to maintain structure
+    for (let i = 0; i < uint8Array.length; i++) {
+        if (uint8Array[i] === 0x00) {
+            uint8Array[i] = 0x20; // space character
+        }
     }
+    return uint8Array.buffer;
 }
 
 // Combine multiple PDFs into one
