@@ -149,15 +149,6 @@ async function downloadFile(authData, fileId) {
   return await response.arrayBuffer()
 }
 
-// Ensure PDF is properly UTF-8 encoded
-// This prevents "unsupported Unicode escape sequence" errors in PostgreSQL
-function ensureUtf8Encoding(buffer) {
-  // Convert to UTF-8 string and back to buffer
-  // This normalizes the encoding
-  const str = Buffer.from(buffer).toString('utf8')
-  return Buffer.from(str, 'utf8')
-}
-
 // Combine multiple PDFs into one
 async function combinePDFs(pdfBuffers) {
   const mergedPdf = await PDFDocument.create()
@@ -359,12 +350,6 @@ app.get('/*', async (req, res) => {
 
     if (fileData === null) {
       return res.status(404).send('Not Found')
-    }
-
-    // Ensure PDF is UTF-8 encoded to prevent PostgreSQL errors
-    if (isPdf) {
-      console.log('Ensuring PDF is UTF-8 encoded')
-      fileData = ensureUtf8Encoding(fileData)
     }
 
     // Determine content type
