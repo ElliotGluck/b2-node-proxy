@@ -125,11 +125,16 @@ async function downloadFile(authData, fileId) {
     return await response.arrayBuffer();
 }
 
-// Remove null bytes from PDF buffer
+// Replace null bytes in PDF buffer with spaces
 function cleanPdfBuffer(buffer) {
     const uint8Array = new Uint8Array(buffer);
-    const cleaned = uint8Array.filter(byte => byte !== 0);
-    return cleaned.buffer;
+    // Replace null bytes (0x00) with spaces (0x20) to maintain buffer length
+    for (let i = 0; i < uint8Array.length; i++) {
+        if (uint8Array[i] === 0) {
+            uint8Array[i] = 0x20; // space character
+        }
+    }
+    return uint8Array.buffer;
 }
 
 // Combine multiple PDFs into one
