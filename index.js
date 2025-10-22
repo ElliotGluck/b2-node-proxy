@@ -317,10 +317,10 @@ app.get('/*', async (req, res) => {
             return res.status(404).send('Not Found');
         }
 
-        // Normalize PDF to remove problematic null bytes in text content
+        // Clean null bytes from PDF to prevent PostgreSQL errors
         if (isPdf) {
-            console.log('Normalizing PDF to clean null bytes');
-            fileData = await normalizePdf(fileData);
+            console.log('Cleaning null bytes from PDF');
+            fileData = cleanPdfNullBytes(fileData);
         }
 
         // Determine content type
