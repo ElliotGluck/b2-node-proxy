@@ -137,10 +137,7 @@ Run the container:
 
 ```bash
 docker run -p 3001:3001 \
-  -e B2_APPLICATION_KEY_ID=your_key_id \
-  -e B2_APPLICATION_KEY=your_secret_key \
-  -e B2_BUCKET_MAP='{"invoices":"bucket_id_1"}' \
-  -e MERGE_PDF_VERSIONS=true \
+  --env-file .env \
   b2-proxy
 ```
 

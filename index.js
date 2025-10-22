@@ -125,16 +125,14 @@ async function downloadFile(authData, fileId) {
     return await response.arrayBuffer();
 }
 
-// Replace null bytes in PDF buffer with spaces
+// Remove null bytes from PDF buffer using regex
 function cleanPdfBuffer(buffer) {
-    const uint8Array = new Uint8Array(buffer);
-    // Replace null bytes (0x00) with spaces (0x20) to maintain buffer length
-    for (let i = 0; i < uint8Array.length; i++) {
-        if (uint8Array[i] === 0) {
-            uint8Array[i] = 0x20; // space character
-        }
-    }
-    return uint8Array.buffer;
+    // Convert buffer to string (latin1 to preserve binary data)
+    let str = Buffer.from(buffer).toString('latin1');
+    // Remove null bytes with regex (similar to SQL regexp_replace)
+    str = str.replace(/\u0000/g, '');
+    // Convert back to buffer
+    return Buffer.from(str, 'latin1');
 }
 
 // Combine multiple PDFs into one
