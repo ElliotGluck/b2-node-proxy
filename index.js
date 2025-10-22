@@ -125,17 +125,22 @@ async function downloadFile(authData, fileId) {
     return await response.arrayBuffer();
 }
 
-// Clean null bytes from PDF by replacing with spaces
+// Clean problematic characters and escape sequences from PDF
 // This prevents "unsupported Unicode escape sequence" errors in PostgreSQL
-function cleanPdfNullBytes(buffer) {
-    const uint8Array = new Uint8Array(buffer);
-    // Replace null bytes with spaces to maintain structure
-    for (let i = 0; i < uint8Array.length; i++) {
-        if (uint8Array[i] === 0x00) {
-            uint8Array[i] = 0x20; // space character
-        }
-    }
-    return uint8Array.buffer;
+function cleanPdfForPostgres(buffer) {
+    // Convert to string using latin1 to preserve all bytes
+    let str = Buffer.from(buffer).toString('latin1');
+
+    // Remove various problematic patterns:
+    // 1. Null bytes (\x00)
+    // 2. Backslash-u escape sequences that might be invalid
+    // 3. Other control characters that cause issues
+    str = str.replace(/\x00/g, ' ');  // Replace null bytes with spaces
+    str = str.replace(/\\u0000/g, '');  // Remove \u0000 escape sequences
+    str = str.replace(/\\x00/g, '');    // Remove \x00 escape sequences
+
+    // Convert back to buffer
+    return Buffer.from(str, 'latin1');
 }
 
 // Combine multiple PDFs into one
@@ -317,10 +322,10 @@ app.get('/*', async (req, res) => {
             return res.status(404).send('Not Found');
         }
 
-        // Clean null bytes from PDF to prevent PostgreSQL errors
+        // Clean problematic escape sequences from PDF to prevent PostgreSQL errors
         if (isPdf) {
-            console.log('Cleaning null bytes from PDF');
-            fileData = cleanPdfNullBytes(fileData);
+            console.log('Cleaning PDF escape sequences for PostgreSQL');
+            fileData = cleanPdfForPostgres(fileData);
         }
 
         // Determine content type
