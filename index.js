@@ -125,14 +125,17 @@ async function downloadFile(authData, fileId) {
     return await response.arrayBuffer();
 }
 
-// Remove null bytes from PDF buffer using regex
-function cleanPdfBuffer(buffer) {
-    // Convert buffer to string (latin1 to preserve binary data)
-    let str = Buffer.from(buffer).toString('latin1');
-    // Remove null bytes with regex (similar to SQL regexp_replace)
-    str = str.replace(/\u0000/g, '');
-    // Convert back to buffer
-    return Buffer.from(str, 'latin1');
+// Normalize PDF by loading and re-saving it
+// This removes problematic null bytes and other issues from the PDF structure
+async function normalizePdf(buffer) {
+    try {
+        const pdf = await PDFDocument.load(buffer, { ignoreEncryption: true });
+        return await pdf.save();
+    } catch (error) {
+        console.error('Error normalizing PDF, returning original:', error);
+        // If normalization fails, return original buffer
+        return buffer;
+    }
 }
 
 // Combine multiple PDFs into one
@@ -314,11 +317,11 @@ app.get('/*', async (req, res) => {
             return res.status(404).send('Not Found');
         }
 
-        // Note: PDF cleaning disabled - null bytes are part of valid PDF structure
-        // if (isPdf) {
-        //     console.log('Cleaning null bytes from PDF');
-        //     fileData = cleanPdfBuffer(fileData);
-        // }
+        // Normalize PDF to remove problematic null bytes in text content
+        if (isPdf) {
+            console.log('Normalizing PDF to clean null bytes');
+            fileData = await normalizePdf(fileData);
+        }
 
         // Determine content type
         let contentType = 'application/octet-stream';
